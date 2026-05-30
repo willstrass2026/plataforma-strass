@@ -5045,6 +5045,91 @@ setTimeout(() => {
   setTimeout(addRememberUI, 1200);
 })();
 
+
+
+/* ---- CORREÇÃO: APÓS LOGIN CARREGAR PLATAFORMA COMPLETA SEM F5 MANUAL ---- */
+(function(){
+  function showLoginError(msg){
+    const e = document.getElementById("sb-login-error");
+    if(e){
+      e.textContent = msg;
+      e.classList.add("open");
+    }else{
+      alert(msg);
+    }
+  }
+
+  // Após login com senha, recarrega automaticamente uma única vez.
+  // Isso evita a tela entrar parcialmente carregada e elimina a necessidade de F5 manual.
+  sbLogin = async function(){
+    const email = (document.getElementById("sb-login-email")?.value || "").trim();
+    const password = document.getElementById("sb-login-password")?.value || "";
+    const remember = document.getElementById("strass-remember-check")?.checked !== false;
+
+    if(!email || !password){
+      showLoginError("Informe e-mail e senha.");
+      return;
+    }
+
+    localStorage.setItem("strass_last_email", email);
+
+    const res = await sbClient.auth.signInWithPassword({ email, password });
+
+    if(res.error){
+      showLoginError(res.error.message);
+      return;
+    }
+
+    if(!remember){
+      sessionStorage.setItem("strass_session_only","1");
+    }else{
+      sessionStorage.removeItem("strass_session_only");
+    }
+
+    // marca que o login foi feito e recarrega a página automaticamente
+    sessionStorage.setItem("strass_login_reload_done","1");
+    window.location.reload();
+  };
+
+  async function forceFullRenderAfterSession(){
+    try{
+      const session = await sbClient.auth.getSession();
+      if(!session?.data?.session) return;
+
+      if(typeof sbInit === "function"){
+        await sbInit();
+      }
+
+      // Reforços em sequência para evitar corrida entre Supabase, renderSidebar e renderBoard
+      const hydrate = async () => {
+        try{
+          if(typeof sbLoadAll === "function") await sbLoadAll();
+
+          if(!activeBoard && db?.boards?.length){
+            activeBoard = db.boards[0].id;
+          }
+
+          if(typeof strassApplyCorrectMode === "function") strassApplyCorrectMode();
+          if(typeof renderSidebar === "function") renderSidebar();
+          if(typeof renderBoard === "function") renderBoard();
+
+          document.querySelectorAll(".sb-sync-pill").forEach(el=>el.remove());
+        }catch(e){
+          console.warn("Reforço de renderização ignorado:", e);
+        }
+      };
+
+      setTimeout(hydrate, 300);
+      setTimeout(hydrate, 900);
+      setTimeout(hydrate, 1800);
+    }catch(e){
+      console.warn("Sessão ainda não disponível:", e);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", forceFullRenderAfterSession);
+})();
+
 </script>
 </body>
 </html>
