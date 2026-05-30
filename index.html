@@ -4512,119 +4512,317 @@ document.addEventListener("DOMContentLoaded", removeSupabaseBadges);
 
 
 
-/* ---- CORREÇÃO ADMIN: WILLIAM SEMPRE VÊ PAINEL COMPLETO ---- */
-const STRASS_ADMIN_EMAILS = [
-  "william@agenciastrass.com.br",
-  "williamstrassburger@hotmail.com"
-];
+/* ---- CORREÇÃO: EXCLUSÃO REAL DE QUADRO + FILTROS SEM ETIQUETAS REPETIDAS ---- */
 
-function strassCurrentEmail(){
-  return String(sbUser?.email || sbProfile?.email || "").trim().toLowerCase();
+function strassBoardRemoteId(boardLocalId){
+  const b = db.boards.find(x => x.id === boardLocalId) || getBoard(boardLocalId);
+  return b ? (sbRemoteSafe?.("boards", b.id) || b.remoteId || null) : null;
 }
 
-function strassIsAdmin(){
-  const email = strassCurrentEmail();
-  return sbProfile?.role === "admin" || STRASS_ADMIN_EMAILS.includes(email);
+function strassLabelsForActiveBoard(){
+  const boardRemote = activeBoard ? strassBoardRemoteId(activeBoard) : null;
+  const seen = new Set();
+
+  return (db.labels || [])
+    .filter(l => {
+      if (boardRemote && l.boardRemoteId === boardRemote) return true;
+      if (!l.boardRemoteId && !l.remoteId) return true;
+      return false;
+    })
+    .filter(l => {
+      const key = String(l.name || "").trim().toLowerCase() + "|" + String(l.color || "");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
-function strassApplyCorrectMode(){
-  const admin = strassIsAdmin();
+/* Mostra no filtro apenas as etiquetas do quadro ativo, sem repetição */
+renderFilterBar = function(){
+  const bar = document.getElementById("filter-bar");
+  if(!bar) return;
 
-  if(admin){
-    document.body.classList.remove("client-mode");
+  const labels = strassLabelsForActiveBoard();
 
-    ["meta-btn","dash-btn","roteiro-btn","trafego-btn","btn-report","sidebar-add","stab-agency","stab-clients"].forEach(id=>{
-      const el=document.getElementById(id);
-      if(el)el.style.display="";
+  // remove filtros que não pertencem mais ao quadro ou foram duplicados
+  const allowedIds = new Set(labels.map(l => l.id));
+  filterLabels = (filterLabels || []).filter(id => allowedIds.has(id));
+
+  bar.innerHTML = labels.map(l => `
+    <button class="filter-chip${filterLabels.includes(l.id) ? " active" : ""}" onclick="toggleFilter(${l.id})">
+      <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${l.color};margin-right:4px;vertical-align:1px"></span>${escapeHtml(l.name)}
+    </button>
+  `).join("");
+
+  const clear = document.getElementById("filter-clear-btn");
+  if(clear) clear.style.display = (filterLabels.length || filterText) ? "inline" : "none";
+};
+
+/* Evita criar etiquetas padrão repetidas no mesmo quadro */
+if (typeof sbForceDefaultLabelsForBoard === "function") {
+  sbForceDefaultLabelsForBoard = async function(boardLocalId){
+    const board = getBoard(boardLocalId || activeBoard);
+    if(!board) return;
+
+    const boardRemote = strassBoardRemoteId(board.id);
+    if(!boardRemote) return;
+
+    const defaults = (typeof SB_LABEL_DEFAULTS_FINAL !== "undefined" ? SB_LABEL_DEFAULTS_FINAL :
+      typeof SB_DEFAULT_LABELS_FIX !== "undefined" ? SB_DEFAULT_LABELS_FIX :
+      [
+        {name:"Programado",color:"#22c55e"},
+        {name:"Pendente",color:"#ef4444"},
+        {name:"Ag. programação",color:"#eab308"},
+        {name:"Ag. aprovação",color:"#3b82f6"},
+        {name:"Pendente gravação",color:"#f43f5e"},
+        {name:"Designer/Editora",color:"#a855f7"},
+        {name:"Alteração",color:"#f97316"}
+      ]
+    );
+
+    const existingRes = await sbClient
+      .from("labels")
+      .select("id,board_id,name,color")
+      .eq("board_id", boardRemote);
+
+    if(existingRes.error){
+      console.warn("Erro ao buscar etiquetas:", existingRes.error.message);
+      return;
+    }
+
+    const existing = existingRes.data || [];
+    const names = new Set(existing.map(l => String(l.name || "").trim().toLowerCase()));
+
+    const missing = defaults
+      .filter(l => !names.has(String(l.name || "").trim().toLowerCase()))
+      .map(l => ({ board_id: boardRemote, name: l.name, color: l.color }));
+
+    let inserted = [];
+    if(missing.length){
+      const ins = await sbClient
+        .from("labels")
+        .insert(missing)
+        .select("id,board_id,name,color");
+
+      if(ins.error){
+        console.warn("Erro ao criar etiquetas padrão:", ins.error.message);
+      } else {
+        inserted = ins.data || [];
+      }
+    }
+
+    [...existing, ...inserted].forEach(l => {
+      if(!sbLocalMap.labels) sbLocalMap.labels = new Map();
+      if(!sbReverseMap.labels) sbReverseMap.labels = new Map();
+
+      let local = sbLocalMap.labels.get(l.id);
+      if(!local){
+        local = db.nextId++;
+        sbLocalMap.labels.set(l.id, local);
+        sbReverseMap.labels.set(local, l.id);
+      }
+
+      const already = db.labels.some(x => x.remoteId === l.id || x.id === local);
+      if(!already){
+        db.labels.push({
+          id: local,
+          remoteId: l.id,
+          boardRemoteId: l.board_id,
+          name: l.name,
+          color: l.color || "#f97316"
+        });
+      }
     });
 
-    const tabs=document.querySelector(".s-tabs") || document.querySelector(".sidebar-tabs");
-    if(tabs)tabs.style.display="";
+    save();
+  };
+}
 
-    const title=document.getElementById("client-only-title");
-    if(title)title.style.display="none";
+/* Excluir quadro agora remove também no Supabase, não apenas local */
+delBoard = async function(e, id){
+  if(e) e.stopPropagation();
 
-    // se estiver na visão forçada de cliente, volta a permitir alternar entre agência/clientes
-    if(typeof renderSidebar === "function"){
-      // não chama aqui para evitar loop
+  const board = db.boards.find(b => b.id === id);
+  if(!board) return;
+
+  const ok = confirm(`Excluir o quadro "${board.name}"?\n\nIsso removerá o quadro, listas, cards, comentários, checklist, etiquetas e anexos vinculados.`);
+  if(!ok) return;
+
+  const remoteBoard = strassBoardRemoteId(id);
+
+  if(remoteBoard){
+    try{
+      // busca cards
+      const cardsRes = await sbClient.from("cards").select("id").eq("board_id", remoteBoard);
+      if(cardsRes.error) throw cardsRes.error;
+
+      const cardIds = (cardsRes.data || []).map(c => c.id);
+
+      // remove anexos do Storage antes de apagar os registros
+      if(cardIds.length){
+        const attRes = await sbClient
+          .from("attachments")
+          .select("file_path")
+          .in("card_id", cardIds);
+
+        if(!attRes.error){
+          const paths = (attRes.data || []).map(a => a.file_path).filter(Boolean);
+          if(paths.length){
+            await sbClient.storage.from(SB_ATTACH_BUCKET || "attachments").remove(paths);
+          }
+        }
+
+        await sbClient.from("attachments").delete().in("card_id", cardIds);
+        await sbClient.from("comments").delete().in("card_id", cardIds);
+        await sbClient.from("checklist_items").delete().in("card_id", cardIds);
+        await sbClient.from("card_labels").delete().in("card_id", cardIds);
+      }
+
+      await sbClient.from("cards").delete().eq("board_id", remoteBoard);
+      await sbClient.from("labels").delete().eq("board_id", remoteBoard);
+      await sbClient.from("lists").delete().eq("board_id", remoteBoard);
+      await sbClient.from("board_members").delete().eq("board_id", remoteBoard);
+
+      // tabelas extras podem não existir em versões antigas; por isso ignoramos erro aqui
+      try{ await sbClient.from("roteiros").delete().eq("board_id", remoteBoard); }catch(err){}
+      try{ await sbClient.from("traffic_campaigns").delete().eq("board_id", remoteBoard); }catch(err){}
+
+      const boardDel = await sbClient.from("boards").delete().eq("id", remoteBoard);
+      if(boardDel.error) throw boardDel.error;
+
+    }catch(err){
+      console.error("Erro ao excluir quadro online:", err);
+      alert("Não consegui excluir o quadro no Supabase:\n\n" + (err.message || JSON.stringify(err)));
+      return;
     }
-  }else{
-    document.body.classList.add("client-mode");
   }
 
-  document.querySelectorAll(".sb-sync-pill").forEach(el=>el.remove());
-  [...document.querySelectorAll("span,div")].forEach(el=>{
-    const txt=(el.textContent||"").trim().toLowerCase();
-    if(txt==="supabase online" || txt==="carregando..." || txt==="sincronizando...") el.remove();
-  });
-}
+  db.boards = db.boards.filter(b => b.id !== id);
 
-// Sobrescreve funções de modo cliente para respeitar admin por e-mail
-if(typeof sbIsAdmin === "function"){
-  sbIsAdmin = strassIsAdmin;
-}
-
-const strassOldApplyClientMode = typeof sbApplyClientMode === "function" ? sbApplyClientMode : null;
-sbApplyClientMode = function(){
-  if(strassIsAdmin()){
-    strassApplyCorrectMode();
-    return;
-  }
-  if(strassOldApplyClientMode)strassOldApplyClientMode();
-};
-
-const strassOldApplyClientSidebarClean = typeof sbApplyClientSidebarClean === "function" ? sbApplyClientSidebarClean : null;
-sbApplyClientSidebarClean = function(){
-  if(strassIsAdmin()){
-    strassApplyCorrectMode();
-    return;
-  }
-  if(strassOldApplyClientSidebarClean)strassOldApplyClientSidebarClean();
-};
-
-const strassOldRenderSidebarAdminFix = typeof renderSidebar === "function" ? renderSidebar : null;
-renderSidebar = function(){
-  if(strassOldRenderSidebarAdminFix)strassOldRenderSidebarAdminFix();
-
-  if(strassIsAdmin()){
-    document.body.classList.remove("client-mode");
-
-    const add=document.getElementById("sidebar-add");
-    if(add)add.style.display="";
-
-    const stabAgency=document.getElementById("stab-agency");
-    if(stabAgency)stabAgency.style.display="";
-
-    const stabClients=document.getElementById("stab-clients");
-    if(stabClients)stabClients.style.display="";
-
-    const tabs=document.querySelector(".s-tabs") || document.querySelector(".sidebar-tabs");
-    if(tabs)tabs.style.display="";
-
-    const title=document.getElementById("client-only-title");
-    if(title)title.style.display="none";
+  if(activeBoard === id){
+    activeBoard = db.boards[0]?.id || null;
   }
 
-  strassApplyCorrectMode();
+  filterLabels = [];
+  filterText = "";
+
+  save();
+
+  if(typeof sbLoadAll === "function"){
+    await sbLoadAll();
+  }
+
+  if(activeBoard && !db.boards.some(b => b.id === activeBoard)){
+    activeBoard = db.boards[0]?.id || null;
+  }
+
+  renderSidebar();
+  renderBoard();
 };
 
-const strassOldRenderBoardAdminFix = typeof renderBoard === "function" ? renderBoard : null;
-renderBoard = function(){
-  if(strassOldRenderBoardAdminFix)strassOldRenderBoardAdminFix();
-  strassApplyCorrectMode();
-  if(typeof sbInjectShareButton === "function")sbInjectShareButton();
+/* Limpa etiquetas duplicadas visualmente ao trocar de quadro */
+const strassOldSelectBoardLabelFix = typeof selectBoard === "function" ? selectBoard : null;
+selectBoard = function(id){
+  filterLabels = [];
+  filterText = "";
+  if(strassOldSelectBoardLabelFix) strassOldSelectBoardLabelFix(id);
+  renderFilterBar();
 };
 
-const strassOldSetViewAdminFix = typeof setView === "function" ? setView : null;
-setView = function(v){
-  if(strassOldSetViewAdminFix)strassOldSetViewAdminFix(v);
-  strassApplyCorrectMode();
-};
+/* Roda uma limpeza visual ao carregar */
+setTimeout(() => {
+  try{
+    renderFilterBar();
+    document.querySelectorAll(".sb-sync-pill").forEach(el => el.remove());
+  }catch(e){}
+}, 1000);
 
-setInterval(strassApplyCorrectMode, 700);
-setTimeout(strassApplyCorrectMode, 300);
-setTimeout(strassApplyCorrectMode, 1200);
-setTimeout(strassApplyCorrectMode, 2500);
+
+
+/* ---- LOGIN FINAL: LOGO CENTRALIZADO + TEXTO LIMPO ---- */
+(function(){
+  const style = document.createElement("style");
+  style.innerHTML = `
+    .sb-login-card{
+      text-align:center!important;
+      padding:34px 34px 30px!important;
+      width:430px!important;
+      border-radius:18px!important;
+    }
+    .sb-login-logo{
+      display:flex!important;
+      justify-content:center!important;
+      align-items:center!important;
+      margin:0 auto 24px!important;
+      font-size:0!important;
+      line-height:1!important;
+      gap:10px!important;
+    }
+    .sb-login-logo::before{
+      content:"";
+      width:42px;
+      height:42px;
+      display:inline-block;
+      background:#ff4b0b;
+      clip-path:polygon(50% 0%,100% 48%,84% 64%,50% 30%,16% 64%,0% 48%);
+      flex-shrink:0;
+    }
+    .sb-login-logo::after{
+      content:"strass";
+      color:#fff;
+      font-size:38px;
+      font-weight:800;
+      letter-spacing:-2.2px;
+      font-family:"Segoe UI",system-ui,sans-serif;
+      line-height:1;
+    }
+    .sb-login-logo span,
+    .sb-login-logo{
+      color:transparent!important;
+    }
+    .sb-login-sub{
+      display:none!important;
+    }
+    .sb-login-label{
+      text-align:left!important;
+      margin-left:0!important;
+    }
+    .sb-login-input{
+      text-align:left!important;
+    }
+    .sb-login-btn{
+      margin-top:18px!important;
+      height:48px!important;
+      font-size:14px!important;
+    }
+  `;
+  document.head.appendChild(style);
+
+  function cleanLogin(){
+    const logo = document.querySelector(".sb-login-logo");
+    if(logo){
+      logo.innerHTML = "";
+      logo.setAttribute("aria-label","Strass");
+    }
+
+    const sub = document.querySelector(".sb-login-sub");
+    if(sub) sub.remove();
+
+    const card = document.querySelector(".sb-login-card");
+    if(card && !document.getElementById("login-helper-text")){
+      const helper = document.createElement("div");
+      helper.id = "login-helper-text";
+      helper.style.cssText = "font-size:13px;color:#777;line-height:1.45;margin:-10px 0 20px;text-align:center";
+      helper.textContent = "Acesse sua área de aprovação de conteúdos.";
+      const emailLabel = card.querySelector(".sb-login-label");
+      if(emailLabel) card.insertBefore(helper, emailLabel);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", cleanLogin);
+  setTimeout(cleanLogin,300);
+  setTimeout(cleanLogin,1000);
+})();
 
 </script>
 </body>
