@@ -5520,6 +5520,277 @@ setTimeout(() => {
   }, 1200);
 })();
 
+
+
+/* ---- CORREÇÃO: ARQUIVAR / RESTAURAR CARTÕES SALVANDO NO SUPABASE ---- */
+(function(){
+  function archiveRemoteCardId(localCardId){
+    const ref = findCardAnywhere(localCardId);
+    return sbRemoteSafe?.("cards", localCardId) || ref?.card?.remoteId || null;
+  }
+
+  function archiveRemoteListId(localColId){
+    return sbRemoteSafe?.("cols", localColId) || null;
+  }
+
+  function buildOnlineCard(c, commentsRaw, checksRaw, attachmentsRaw, cardLabelsRaw){
+    const cardLocalId = sbLocal("cards", c.id);
+
+    const cardComments = commentsRaw.filter(cm=>cm.card_id===c.id).map(cm=>{
+      const created = new Date(cm.created_at);
+      const timeStr = `${String(created.getDate()).padStart(2,"0")}/${String(created.getMonth()+1).padStart(2,"0")} ${String(created.getHours()).padStart(2,"0")}:${String(created.getMinutes()).padStart(2,"0")}`;
+      return {
+        id: sbLocal("comments", cm.id),
+        remoteId: cm.id,
+        author: cm.profiles?.name || cm.profiles?.email || "Usuário",
+        text: cm.text || "",
+        time: timeStr
+      };
+    });
+
+    const cardChecks = checksRaw.filter(ch=>ch.card_id===c.id).map(ch=>({
+      id: sbLocal("checklist", ch.id),
+      remoteId: ch.id,
+      text: ch.text || "",
+      done: !!ch.done
+    }));
+
+    const cardAttachments = attachmentsRaw.filter(a=>a.card_id===c.id).map(a=>({
+      id: sbLocal("attachments", a.id),
+      remoteId: a.id,
+      name: a.file_name,
+      type: a.file_type || "application/octet-stream",
+      size: a.file_size || 0,
+      filePath: a.file_path,
+      dataUrl: ""
+    }));
+
+    const cardLabelIds = cardLabelsRaw
+      .filter(cl=>cl.card_id===c.id)
+      .map(cl=>sbLocal("labels", cl.label_id))
+      .filter(Boolean);
+
+    const coverLocal = c.cover_attachment_id ? sbLocal("attachments", c.cover_attachment_id) : null;
+
+    return {
+      id: cardLocalId,
+      remoteId: c.id,
+      title: c.title || "",
+      labels: cardLabelIds,
+      date: c.due_date || null,
+      desc: c.description || "",
+      checklist: cardChecks,
+      comments: cardComments,
+      attachments: cardAttachments,
+      cover: coverLocal,
+      _archivedFrom: c.archived_from || "",
+      _archivedListRemoteId: c.list_id || null,
+      archived: !!c.archived,
+      history: [{type:"create", text:"Sincronizado do Supabase", time:nowStr()}]
+    };
+  }
+
+  // Recarrega quadros separando cards ativos e cards arquivados.
+  sbLoadAll = async function(){
+    if(typeof sbSetBusy === "function") sbSetBusy("Carregando...");
+
+    sbLocalMap = {boards:new Map(),cols:new Map(),cards:new Map(),labels:new Map(),checklist:new Map(),comments:new Map(),attachments:new Map()};
+    sbReverseMap = {boards:new Map(),cols:new Map(),cards:new Map(),labels:new Map(),checklist:new Map(),comments:new Map(),attachments:new Map()};
+
+    const boardsRes = await sbClient
+      .from("boards")
+      .select("id,name,type,created_at")
+      .order("name",{ascending:true});
+
+    if(boardsRes.error){
+      alert("Erro ao carregar quadros: " + boardsRes.error.message);
+      return;
+    }
+
+    const newBoards = [];
+    const allLabels = [];
+
+    for(const rb of (boardsRes.data || [])){
+      const bid = sbLocal("boards", rb.id);
+
+      const [listsRes, cardsRes, labelsRes] = await Promise.all([
+        sbClient.from("lists").select("id,name,position").eq("board_id", rb.id).order("position",{ascending:true}),
+        sbClient.from("cards").select("id,list_id,title,description,due_date,position,created_at,cover_attachment_id,archived,archived_from,archived_at").eq("board_id", rb.id).order("position",{ascending:true}),
+        sbClient.from("labels").select("id,board_id,name,color").eq("board_id", rb.id).order("created_at",{ascending:true})
+      ]);
+
+      if(listsRes.error){
+        alert("Erro ao carregar listas: " + listsRes.error.message);
+        return;
+      }
+
+      if(cardsRes.error){
+        alert("Erro ao carregar cards. Talvez falte rodar o SQL de arquivo/arquivamento no Supabase:\n\n" + cardsRes.error.message);
+        return;
+      }
+
+      (labelsRes.data || []).forEach(l=>{
+        const lid = sbLocal("labels", l.id);
+        allLabels.push({
+          id: lid,
+          remoteId: l.id,
+          boardRemoteId: l.board_id,
+          name: l.name,
+          color: l.color || "#f97316"
+        });
+      });
+
+      const cardsRaw = cardsRes.data || [];
+      const cardIds = cardsRaw.map(c=>c.id);
+      let commentsRaw = [], checksRaw = [], attachmentsRaw = [], cardLabelsRaw = [];
+
+      if(cardIds.length){
+        const [commentsRes, checksRes, attachmentsRes, cardLabelsRes] = await Promise.all([
+          sbClient.from("comments").select("id,card_id,user_id,text,created_at,profiles(name,email)").in("card_id",cardIds).order("created_at",{ascending:true}),
+          sbClient.from("checklist_items").select("id,card_id,text,done,position,created_at").in("card_id",cardIds).order("position",{ascending:true}),
+          sbClient.from("attachments").select("id,card_id,file_name,file_path,file_type,file_size,created_at").in("card_id",cardIds).order("created_at",{ascending:true}),
+          sbClient.from("card_labels").select("id,card_id,label_id").in("card_id",cardIds)
+        ]);
+
+        if(!commentsRes.error) commentsRaw = commentsRes.data || [];
+        if(!checksRes.error) checksRaw = checksRes.data || [];
+        if(!attachmentsRes.error) attachmentsRaw = attachmentsRes.data || [];
+        if(!cardLabelsRes.error) cardLabelsRaw = cardLabelsRes.data || [];
+      }
+
+      const cols = (listsRes.data || []).map(l=>{
+        const cid = sbLocal("cols", l.id);
+
+        const listCards = cardsRaw
+          .filter(c=>c.list_id === l.id && !c.archived)
+          .map(c=>buildOnlineCard(c, commentsRaw, checksRaw, attachmentsRaw, cardLabelsRaw));
+
+        return {
+          id: cid,
+          remoteId: l.id,
+          name: l.name,
+          cards: listCards
+        };
+      });
+
+      const archivedCards = cardsRaw
+        .filter(c=>!!c.archived)
+        .map(c=>buildOnlineCard(c, commentsRaw, checksRaw, attachmentsRaw, cardLabelsRaw));
+
+      newBoards.push({
+        id: bid,
+        remoteId: rb.id,
+        name: rb.name,
+        type: rb.type || "client",
+        archived: archivedCards,
+        cols
+      });
+    }
+
+    db.boards = newBoards;
+    db.labels = allLabels;
+    save();
+
+    if(typeof sbSetReady === "function") sbSetReady("Online");
+  };
+
+  quickArchive = async function(e, cardId){
+    if(e) e.stopPropagation();
+
+    if(!confirm("Arquivar este cartão?")) return;
+
+    const ref = findCardAnywhere(cardId);
+    if(!ref) return;
+
+    const remoteCard = archiveRemoteCardId(cardId);
+    if(!remoteCard){
+      alert("Não encontrei o vínculo online deste cartão. Atualize a página e tente novamente.");
+      return;
+    }
+
+    const upd = await sbClient
+      .from("cards")
+      .update({
+        archived: true,
+        archived_from: ref.col.name,
+        archived_at: new Date().toISOString()
+      })
+      .eq("id", remoteCard);
+
+    if(upd.error){
+      alert("Erro ao arquivar no Supabase:\n\n" + upd.error.message);
+      return;
+    }
+
+    const board = ref.board;
+    if(!board.archived) board.archived = [];
+
+    ref.card._archivedFrom = ref.col.name;
+    ref.card._archivedListRemoteId = archiveRemoteListId(ref.col.id);
+    ref.card.archived = true;
+
+    addHistory(ref.card, "move", "Cartão arquivado");
+
+    board.archived.push(ref.card);
+    ref.col.cards = ref.col.cards.filter(c=>c.id !== cardId);
+
+    save();
+    closeAllQuickMenus();
+    renderBoard();
+
+    if(document.getElementById("board-settings-panel")?.classList.contains("open")){
+      renderArchivedPanel();
+    }
+  };
+
+  restoreCard = async function(cardId){
+    const board = getBoard();
+    if(!board?.archived) return;
+
+    const idx = board.archived.findIndex(c=>c.id === cardId);
+    if(idx === -1) return;
+
+    const card = board.archived[idx];
+    const remoteCard = archiveRemoteCardId(cardId) || card.remoteId;
+
+    let targetCol = board.cols.find(c=>c.name === card._archivedFrom) || board.cols[0];
+    if(!targetCol){
+      alert("Não existe coluna para restaurar este cartão.");
+      return;
+    }
+
+    const remoteList = archiveRemoteListId(targetCol.id) || targetCol.remoteId || card._archivedListRemoteId || null;
+
+    if(remoteCard){
+      const upd = await sbClient
+        .from("cards")
+        .update({
+          archived: false,
+          archived_from: null,
+          archived_at: null,
+          list_id: remoteList
+        })
+        .eq("id", remoteCard);
+
+      if(upd.error){
+        alert("Erro ao restaurar no Supabase:\n\n" + upd.error.message);
+        return;
+      }
+    }
+
+    const restored = board.archived.splice(idx,1)[0];
+    restored.archived = false;
+    restored._archivedFrom = "";
+    addHistory(restored, "move", "Cartão restaurado dos arquivados");
+
+    targetCol.cards.push(restored);
+
+    save();
+    renderArchivedPanel();
+    renderBoard();
+  };
+})();
+
 </script>
 </body>
 </html>
