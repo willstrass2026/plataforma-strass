@@ -4909,6 +4909,142 @@ setTimeout(() => {
   setTimeout(applyOriginalLogo, 2000);
 })();
 
+
+
+/* ---- LOGIN: MANTER CONECTADO / LEMBRAR ACESSO ---- */
+(function(){
+  const style = document.createElement("style");
+  style.innerHTML = `
+    .strass-remember-row{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin:12px 0 2px;
+      font-size:12px;
+      color:#888;
+    }
+    .strass-remember-left{
+      display:flex;
+      align-items:center;
+      gap:7px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .strass-remember-left input{
+      width:14px!important;
+      height:14px!important;
+      accent-color:#f97316;
+      cursor:pointer;
+    }
+    .strass-forgot-link{
+      color:#f97316;
+      text-decoration:none;
+      cursor:pointer;
+      font-size:12px;
+      white-space:nowrap;
+    }
+    .strass-forgot-link:hover{
+      text-decoration:underline;
+    }
+  `;
+  document.head.appendChild(style);
+
+  function addRememberUI(){
+    const pass = document.getElementById("sb-login-password");
+    const btn = document.querySelector(".sb-login-btn");
+    if(!pass || !btn || document.getElementById("strass-remember-row")) return;
+
+    const row = document.createElement("div");
+    row.id = "strass-remember-row";
+    row.className = "strass-remember-row";
+    row.innerHTML = `
+      <label class="strass-remember-left">
+        <input type="checkbox" id="strass-remember-check" checked>
+        <span>Manter conectado</span>
+      </label>
+      <a class="strass-forgot-link" onclick="strassResetPassword()">Esqueci minha senha</a>
+    `;
+
+    btn.parentElement.insertBefore(row, btn);
+
+    const savedEmail = localStorage.getItem("strass_last_email");
+    const emailInput = document.getElementById("sb-login-email");
+    if(savedEmail && emailInput) emailInput.value = savedEmail;
+  }
+
+  window.strassResetPassword = async function(){
+    const email = (document.getElementById("sb-login-email")?.value || "").trim();
+
+    if(!email || !email.includes("@")){
+      alert("Digite seu e-mail primeiro para receber o link de redefinição de senha.");
+      return;
+    }
+
+    try{
+      const redirectTo = window.location.origin;
+      const res = await sbClient.auth.resetPasswordForEmail(email, { redirectTo });
+
+      if(res.error){
+        alert("Erro ao enviar recuperação de senha:\n\n" + res.error.message);
+        return;
+      }
+
+      alert("Enviamos um link de redefinição de senha para:\n\n" + email);
+    }catch(err){
+      alert("Não foi possível enviar a recuperação de senha:\n\n" + (err.message || err));
+    }
+  };
+
+  const oldLoginRemember = typeof sbLogin === "function" ? sbLogin : null;
+  if(oldLoginRemember){
+    sbLogin = async function(){
+      const email = (document.getElementById("sb-login-email")?.value || "").trim();
+      const remember = document.getElementById("strass-remember-check")?.checked !== false;
+
+      if(email) localStorage.setItem("strass_last_email", email);
+
+      const res = await sbClient.auth.signInWithPassword({
+        email,
+        password: document.getElementById("sb-login-password").value
+      });
+
+      if(res.error){
+        const e=document.getElementById("sb-login-error");
+        if(e){e.textContent=res.error.message;e.classList.add("open");}
+        return;
+      }
+
+      if(!remember){
+        sessionStorage.setItem("strass_session_only","1");
+      }else{
+        sessionStorage.removeItem("strass_session_only");
+      }
+
+      await sbInit();
+    };
+  }
+
+  // Se já existe sessão válida no navegador, pula a tela de login automaticamente.
+  async function autoEnterIfSession(){
+    try{
+      const session = await sbClient.auth.getSession();
+      if(session?.data?.session){
+        const screen = document.getElementById("sb-login-screen");
+        if(screen) screen.classList.remove("open");
+        await sbInit();
+      }
+    }catch(e){}
+  }
+
+  document.addEventListener("DOMContentLoaded", function(){
+    addRememberUI();
+    setTimeout(autoEnterIfSession, 400);
+  });
+  setTimeout(addRememberUI, 300);
+  setTimeout(addRememberUI, 1200);
+})();
+
 </script>
 </body>
 </html>
