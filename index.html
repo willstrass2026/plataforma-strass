@@ -4510,6 +4510,122 @@ renderSidebar = function(){
 setInterval(removeSupabaseBadges, 800);
 document.addEventListener("DOMContentLoaded", removeSupabaseBadges);
 
+
+
+/* ---- CORREÇÃO ADMIN: WILLIAM SEMPRE VÊ PAINEL COMPLETO ---- */
+const STRASS_ADMIN_EMAILS = [
+  "william@agenciastrass.com.br",
+  "williamstrassburger@hotmail.com"
+];
+
+function strassCurrentEmail(){
+  return String(sbUser?.email || sbProfile?.email || "").trim().toLowerCase();
+}
+
+function strassIsAdmin(){
+  const email = strassCurrentEmail();
+  return sbProfile?.role === "admin" || STRASS_ADMIN_EMAILS.includes(email);
+}
+
+function strassApplyCorrectMode(){
+  const admin = strassIsAdmin();
+
+  if(admin){
+    document.body.classList.remove("client-mode");
+
+    ["meta-btn","dash-btn","roteiro-btn","trafego-btn","btn-report","sidebar-add","stab-agency","stab-clients"].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el)el.style.display="";
+    });
+
+    const tabs=document.querySelector(".s-tabs") || document.querySelector(".sidebar-tabs");
+    if(tabs)tabs.style.display="";
+
+    const title=document.getElementById("client-only-title");
+    if(title)title.style.display="none";
+
+    // se estiver na visão forçada de cliente, volta a permitir alternar entre agência/clientes
+    if(typeof renderSidebar === "function"){
+      // não chama aqui para evitar loop
+    }
+  }else{
+    document.body.classList.add("client-mode");
+  }
+
+  document.querySelectorAll(".sb-sync-pill").forEach(el=>el.remove());
+  [...document.querySelectorAll("span,div")].forEach(el=>{
+    const txt=(el.textContent||"").trim().toLowerCase();
+    if(txt==="supabase online" || txt==="carregando..." || txt==="sincronizando...") el.remove();
+  });
+}
+
+// Sobrescreve funções de modo cliente para respeitar admin por e-mail
+if(typeof sbIsAdmin === "function"){
+  sbIsAdmin = strassIsAdmin;
+}
+
+const strassOldApplyClientMode = typeof sbApplyClientMode === "function" ? sbApplyClientMode : null;
+sbApplyClientMode = function(){
+  if(strassIsAdmin()){
+    strassApplyCorrectMode();
+    return;
+  }
+  if(strassOldApplyClientMode)strassOldApplyClientMode();
+};
+
+const strassOldApplyClientSidebarClean = typeof sbApplyClientSidebarClean === "function" ? sbApplyClientSidebarClean : null;
+sbApplyClientSidebarClean = function(){
+  if(strassIsAdmin()){
+    strassApplyCorrectMode();
+    return;
+  }
+  if(strassOldApplyClientSidebarClean)strassOldApplyClientSidebarClean();
+};
+
+const strassOldRenderSidebarAdminFix = typeof renderSidebar === "function" ? renderSidebar : null;
+renderSidebar = function(){
+  if(strassOldRenderSidebarAdminFix)strassOldRenderSidebarAdminFix();
+
+  if(strassIsAdmin()){
+    document.body.classList.remove("client-mode");
+
+    const add=document.getElementById("sidebar-add");
+    if(add)add.style.display="";
+
+    const stabAgency=document.getElementById("stab-agency");
+    if(stabAgency)stabAgency.style.display="";
+
+    const stabClients=document.getElementById("stab-clients");
+    if(stabClients)stabClients.style.display="";
+
+    const tabs=document.querySelector(".s-tabs") || document.querySelector(".sidebar-tabs");
+    if(tabs)tabs.style.display="";
+
+    const title=document.getElementById("client-only-title");
+    if(title)title.style.display="none";
+  }
+
+  strassApplyCorrectMode();
+};
+
+const strassOldRenderBoardAdminFix = typeof renderBoard === "function" ? renderBoard : null;
+renderBoard = function(){
+  if(strassOldRenderBoardAdminFix)strassOldRenderBoardAdminFix();
+  strassApplyCorrectMode();
+  if(typeof sbInjectShareButton === "function")sbInjectShareButton();
+};
+
+const strassOldSetViewAdminFix = typeof setView === "function" ? setView : null;
+setView = function(v){
+  if(strassOldSetViewAdminFix)strassOldSetViewAdminFix(v);
+  strassApplyCorrectMode();
+};
+
+setInterval(strassApplyCorrectMode, 700);
+setTimeout(strassApplyCorrectMode, 300);
+setTimeout(strassApplyCorrectMode, 1200);
+setTimeout(strassApplyCorrectMode, 2500);
+
 </script>
 </body>
 </html>
