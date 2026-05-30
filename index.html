@@ -5120,6 +5120,406 @@ setTimeout(() => {
   }, 1200);
 })();
 
+
+
+/* ---- FIX DEFINITIVO: SEM PISCAR/TROCAR DE TELA APÓS LOGIN ---- */
+(function(){
+  const FINAL_ADMIN_EMAILS = ["william@agenciastrass.com.br","williamstrassburger@hotmail.com"];
+
+  // Esconde a plataforma durante o carregamento inicial para não mostrar "Quadro" antes de ir para "Metas".
+  document.body.classList.add("strass-booting");
+
+  const style = document.createElement("style");
+  style.innerHTML = `
+    body.strass-booting .topbar,
+    body.strass-booting .main{
+      opacity:0!important;
+      pointer-events:none!important;
+    }
+    body.strass-booting .sb-login-screen:not(.open){
+      display:none!important;
+    }
+    .strass-loading-screen{
+      position:fixed;
+      inset:0;
+      z-index:29999;
+      background:#0d0d0f;
+      display:none;
+      align-items:center;
+      justify-content:center;
+      color:#777;
+      font-size:13px;
+    }
+    body.strass-booting .strass-loading-screen{
+      display:flex;
+    }
+    body.strass-login-visible .strass-loading-screen{
+      display:none!important;
+    }
+  `;
+  document.head.appendChild(style);
+
+  if(!document.getElementById("strass-loading-screen")){
+    const loader = document.createElement("div");
+    loader.id = "strass-loading-screen";
+    loader.className = "strass-loading-screen";
+    loader.textContent = "Carregando plataforma...";
+    document.body.appendChild(loader);
+  }
+
+  function finalEmail(){
+    return String(sbUser?.email || sbProfile?.email || "").trim().toLowerCase();
+  }
+
+  function finalIsAdmin(){
+    return sbProfile?.role === "admin" || FINAL_ADMIN_EMAILS.includes(finalEmail());
+  }
+
+  function removeTech(){
+    document.querySelectorAll(".sb-sync-pill").forEach(el=>el.remove());
+    [...document.querySelectorAll("span,div")].forEach(el=>{
+      const txt=(el.textContent||"").trim().toLowerCase();
+      if(txt==="supabase online" || txt==="carregando..." || txt==="sincronizando...") el.remove();
+    });
+  }
+
+  function showAdminShell(){
+    if(!finalIsAdmin()) return;
+
+    document.body.classList.remove("client-mode");
+
+    ["meta-btn","dash-btn","roteiro-btn","trafego-btn","btn-report","sidebar-add","stab-agency","stab-clients","btn-cal","btn-board"].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.style.display="";
+    });
+
+    const tabs=document.querySelector(".s-tabs") || document.querySelector(".sidebar-tabs");
+    if(tabs) tabs.style.display="";
+
+    const title=document.getElementById("client-only-title");
+    if(title) title.style.display="none";
+  }
+
+  function showLoginClean(){
+    document.body.classList.remove("strass-booting");
+    document.body.classList.add("strass-login-visible");
+    if(typeof sbShowLogin === "function") sbShowLogin();
+  }
+
+  function showAppReady(){
+    document.body.classList.remove("strass-booting");
+    document.body.classList.remove("strass-login-visible");
+    document.body.classList.add("strass-ready");
+    removeTech();
+  }
+
+  // Substitui o carregamento inicial antigo por um fluxo único:
+  // login -> carrega tudo -> escolhe a tela correta -> mostra a plataforma.
+  sbInit = async function(){
+    const session = await sbClient.auth.getSession();
+
+    if(!session.data.session){
+      showLoginClean();
+      return;
+    }
+
+    document.body.classList.add("strass-booting");
+    document.body.classList.remove("strass-login-visible");
+
+    sbUser = session.data.session.user;
+
+    const prof = await sbClient
+      .from("profiles")
+      .select("*")
+      .eq("id", sbUser.id)
+      .single();
+
+    if(prof.error){
+      const e=document.getElementById("sb-login-error");
+      if(e){
+        e.textContent="Erro ao carregar perfil: " + prof.error.message;
+        e.classList.add("open");
+      }
+      showLoginClean();
+      return;
+    }
+
+    sbProfile = prof.data;
+
+    if(typeof sbHideLogin === "function") sbHideLogin();
+
+    if(typeof sbLoadAll === "function"){
+      await sbLoadAll();
+    }
+
+    if(!activeBoard && db?.boards?.length){
+      activeBoard = db.boards[0].id;
+    }
+
+    if(finalIsAdmin()){
+      showAdminShell();
+
+      if(typeof renderSidebar === "function") renderSidebar();
+      showAdminShell();
+
+      if(typeof setView === "function"){
+        setView("metas");
+      }
+
+      showAdminShell();
+    }else{
+      if(typeof renderSidebar === "function") renderSidebar();
+
+      if(typeof setView === "function"){
+        setView("board");
+      }
+
+      if(typeof sbApplyClientSidebarClean === "function"){
+        sbApplyClientSidebarClean();
+      }
+    }
+
+    if(typeof sbInjectLogout === "function") sbInjectLogout();
+
+    // Só agora mostra a plataforma, já na tela correta.
+    requestAnimationFrame(()=>{
+      requestAnimationFrame(showAppReady);
+    });
+  };
+
+  // Login sem mostrar tela intermediária.
+  sbLogin = async function(){
+    const email = (document.getElementById("sb-login-email")?.value || "").trim();
+    const password = document.getElementById("sb-login-password")?.value || "";
+    const remember = document.getElementById("strass-remember-check")?.checked !== false;
+
+    if(!email || !password){
+      const e=document.getElementById("sb-login-error");
+      if(e){e.textContent="Informe e-mail e senha.";e.classList.add("open");}
+      return;
+    }
+
+    localStorage.setItem("strass_last_email", email);
+
+    const res = await sbClient.auth.signInWithPassword({ email, password });
+
+    if(res.error){
+      const e=document.getElementById("sb-login-error");
+      if(e){e.textContent=res.error.message;e.classList.add("open");}
+      return;
+    }
+
+    if(!remember){
+      sessionStorage.setItem("strass_session_only","1");
+    }else{
+      sessionStorage.removeItem("strass_session_only");
+    }
+
+    await sbInit();
+  };
+
+  // Qualquer tentativa antiga de abrir "board" logo no começo fica escondida pelo booting.
+  setTimeout(()=>sbInit(), 50);
+  setTimeout(()=>{ if(document.body.classList.contains("strass-booting")) sbInit(); }, 900);
+})();
+
+
+
+/* ---- CORREÇÃO FINAL: SIDEBAR POR ÁREA + HOME SEM TROCA VISUAL ---- */
+(function(){
+  const STRASS_FINAL_ADMINS = ["william@agenciastrass.com.br","williamstrassburger@hotmail.com"];
+
+  function adminEmailFinal(){
+    return String(sbUser?.email || sbProfile?.email || "").trim().toLowerCase();
+  }
+
+  function isFinalAdmin(){
+    return sbProfile?.role === "admin" || STRASS_FINAL_ADMINS.includes(adminEmailFinal());
+  }
+
+  function boardAreaFinal(board){
+    return board?.type === "agency" ? "agency" : "client";
+  }
+
+  function cleanTechFinal(){
+    document.querySelectorAll(".sb-sync-pill").forEach(el=>el.remove());
+    [...document.querySelectorAll("span,div")].forEach(el=>{
+      const txt=(el.textContent||"").trim().toLowerCase();
+      if(txt==="supabase online" || txt==="carregando..." || txt==="sincronizando...") el.remove();
+    });
+  }
+
+  function showFullAdminShellFinal(){
+    if(!isFinalAdmin()) return;
+
+    document.body.classList.remove("client-mode");
+
+    ["meta-btn","dash-btn","roteiro-btn","trafego-btn","btn-report","sidebar-add","stab-agency","stab-clients","btn-cal","btn-board"].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.style.display="";
+    });
+
+    const tabs=document.querySelector(".sidebar-tabs") || document.querySelector(".s-tabs");
+    if(tabs) tabs.style.display="";
+
+    const title=document.getElementById("client-only-title");
+    if(title) title.style.display="none";
+  }
+
+  // Renderização única e definitiva da lateral.
+  // Admin: separa Agência e Clientes.
+  // Cliente: mostra apenas quadros liberados.
+  renderSidebar = function(){
+    const body = document.getElementById("sidebar-body");
+    const add = document.getElementById("sidebar-add");
+    if(!body) return;
+
+    if(isFinalAdmin()){
+      showFullAdminShellFinal();
+
+      const area = sideTab === "agency" ? "agency" : "client";
+
+      const filtered = (db.boards || [])
+        .filter(b => boardAreaFinal(b) === area)
+        .slice()
+        .sort((a,b)=>a.name.localeCompare(b.name,"pt-BR",{sensitivity:"base"}));
+
+      body.innerHTML = filtered.length
+        ? filtered.map(b=>`
+          <div class="s-item${b.id===activeBoard && !["metas","dashboard","roteiros","editor","report","trafego"].includes(currentView) ? " active" : ""}" onclick="selectBoard(${b.id})">
+            <div class="s-icon"><i class="ti ti-layout-kanban" style="font-size:12px"></i></div>
+            <span style="flex:1">${escapeHtml(b.name)}</span>
+            <button class="s-del" onclick="delBoard(event,${b.id})">×</button>
+          </div>
+        `).join("")
+        : `<div class="empty-note2" style="margin:12px">Nenhum quadro nesta área.</div>`;
+
+      if(add){
+        add.style.display="";
+        add.innerHTML=`<button class="tbtn" style="width:100%;justify-content:center;font-size:12px" onclick="openOv('ov-newboard')"><i class="ti ti-plus"></i> Novo quadro</button>`;
+      }
+
+      const stabAgency=document.getElementById("stab-agency");
+      const stabClients=document.getElementById("stab-clients");
+      if(stabAgency) stabAgency.classList.toggle("active", sideTab === "agency");
+      if(stabClients) stabClients.classList.toggle("active", sideTab === "clients");
+
+      cleanTechFinal();
+      return;
+    }
+
+    // Cliente: sem abas, sem funções internas, apenas quadros liberados pelo Supabase/RLS.
+    document.body.classList.add("client-mode");
+    sideTab = "clients";
+
+    ["meta-btn","dash-btn","roteiro-btn","trafego-btn","btn-report","sidebar-add","stab-agency","stab-clients"].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el) el.style.display="none";
+    });
+
+    const tabs=document.querySelector(".sidebar-tabs") || document.querySelector(".s-tabs");
+    if(tabs) tabs.style.display="none";
+
+    const title=document.getElementById("client-only-title");
+    const side=document.querySelector(".sidebar");
+    if(title && side && title.parentElement!==side) side.insertBefore(title, body);
+    if(title) title.style.display="block";
+
+    const allowed = (db.boards || [])
+      .slice()
+      .sort((a,b)=>a.name.localeCompare(b.name,"pt-BR",{sensitivity:"base"}));
+
+    body.innerHTML = allowed.length
+      ? allowed.map(b=>`
+        <div class="s-item${b.id===activeBoard ? " active" : ""}" onclick="selectBoard(${b.id})">
+          <div class="s-icon"><i class="ti ti-layout-kanban" style="font-size:12px"></i></div>
+          <span style="flex:1">${escapeHtml(b.name)}</span>
+        </div>
+      `).join("")
+      : `<div class="empty-note2" style="margin:12px">Nenhum quadro liberado.</div>`;
+
+    cleanTechFinal();
+  };
+
+  setSideTab = function(tab){
+    sideTab = tab === "agency" ? "agency" : "clients";
+
+    const stabAgency=document.getElementById("stab-agency");
+    const stabClients=document.getElementById("stab-clients");
+
+    if(stabAgency) stabAgency.classList.toggle("active", sideTab === "agency");
+    if(stabClients) stabClients.classList.toggle("active", sideTab === "clients");
+
+    renderSidebar();
+  };
+
+  selectBoard = function(id){
+    activeBoard = id;
+    filterLabels = [];
+    filterText = "";
+
+    const board = getBoard(id);
+    if(isFinalAdmin() && board){
+      sideTab = boardAreaFinal(board) === "agency" ? "agency" : "clients";
+    }
+
+    setView("board");
+    renderSidebar();
+    renderBoard();
+  };
+
+  // Admin sempre começa em Metas, sem mostrar o quadro antes.
+  async function openFinalHome(){
+    try{
+      const session = await sbClient.auth.getSession();
+      if(!session?.data?.session) return;
+
+      if(typeof sbInit === "function" && (!sbUser || !sbProfile)){
+        await sbInit();
+      }
+
+      if(typeof sbLoadAll === "function"){
+        await sbLoadAll();
+      }
+
+      if(isFinalAdmin()){
+        showFullAdminShellFinal();
+        sideTab = "agency";
+        renderSidebar();
+        setView("metas");
+        cleanTechFinal();
+      }else{
+        if(!activeBoard && db?.boards?.length) activeBoard = db.boards[0].id;
+        renderSidebar();
+        setView("board");
+        cleanTechFinal();
+      }
+    }catch(e){
+      console.warn("Erro ao abrir home final:", e);
+    }
+  }
+
+  const oldRenderBoardFinalFix = typeof renderBoard === "function" ? renderBoard : null;
+  if(oldRenderBoardFinalFix){
+    renderBoard = function(){
+      oldRenderBoardFinalFix();
+      if(isFinalAdmin()) showFullAdminShellFinal();
+      cleanTechFinal();
+    };
+  }
+
+  document.addEventListener("DOMContentLoaded", function(){
+    setTimeout(openFinalHome, 300);
+    setTimeout(openFinalHome, 1200);
+  });
+
+  setTimeout(openFinalHome, 2200);
+  setInterval(function(){
+    if(isFinalAdmin()) showFullAdminShellFinal();
+    cleanTechFinal();
+  }, 1200);
+})();
+
 </script>
 </body>
 </html>
